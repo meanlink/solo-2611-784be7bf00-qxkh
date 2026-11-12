@@ -1,0 +1,105 @@
+name: sensor-corr
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-sensor-corr}-frontend
+    ports:
+      - "${FRONTEND_PORT:-18201}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz | grep ok"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-sensor-corr}-backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-mysql+pymysql://batch:batchpass@db:3306/analytics}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:-change-this-in-local}
+      SEED_DEMO: "true"
+      PROJECT_KEY: "correlation_diag"
+    ports:
+      - "${BACKEND_PORT:-19201}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - artifacts:/app/artifacts
+    command: >
+      sh -c "python -m scripts.seed_demo --wait &&
+             uvicorn src.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+
+  worker:
+    build:
+      context: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-sensor-corr}-worker
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-mysql+pymysql://batch:batchpass@db:3306/analytics}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:-change-this-in-local}
+      PROJECT_KEY: "correlation_diag"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - artifacts:/app/artifacts
+    command: celery -A src.worker.celery_app worker --loglevel=INFO --concurrency=1
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A src.worker.celery_app inspect ping -d celery@$$HOSTNAME | grep -q pong"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  db:
+    image: mysql:8.0
+    container_name: ${COMPOSE_PROJECT_NAME:-sensor-corr}-db
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-analytics}
+      MYSQL_USER: ${MYSQL_USER:-batch}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-batchpass}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+    ports:
+      - "${DB_PORT:-17701}:3306"
+    volumes:
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-sensor-corr}-redis
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  dbdata:
+    name: ${COMPOSE_PROJECT_NAME:-sensor-corr}-dbdata
+  redisdata:
+    name: ${COMPOSE_PROJECT_NAME:-sensor-corr}-redisdata
+  artifacts:
+    name: ${COMPOSE_PROJECT_NAME:-sensor-corr}-artifacts
